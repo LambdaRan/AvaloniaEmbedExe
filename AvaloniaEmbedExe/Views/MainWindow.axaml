@@ -1,0 +1,39 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:AvaloniaEmbedExe.ViewModels"
+        xmlns:nativeexe="using:AvaloniaEmbedExe.Controls"
+        xmlns:nativecontrol="using:AvaloniaEmbedExe.NativeControls"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="600"
+        x:Class="AvaloniaEmbedExe.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Icon="/Assets/avalonia-logo.ico"
+        Title="Avalonia 嵌入外部应用"
+        Width="600" Height="500">
+
+    <Design.DataContext>
+        <vm:MainWindowViewModel/>
+    </Design.DataContext>
+
+    <Grid RowDefinitions="Auto,*" ColumnDefinitions="*, Auto">
+        <!-- 标题栏 -->
+        <Border Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Padding="16,10">
+            <TextBlock Text="{Binding Greeting}"
+                       FontSize="18" FontWeight="SemiBold"
+                       HorizontalAlignment="Center"/>
+        </Border>
+        <!--嵌入的控件-->
+      <Border Grid.Row="1" Grid.Column="0" BorderBrush="Gray" BorderThickness="1" Margin="8">
+        <ContentControl x:Name="EmbedWpf" />
+      </Border>
+        <!-- 嵌入的应用 -->
+      <Border Grid.Row="1" Grid.Column="1" BorderBrush="Red" BorderThickness="1" Margin="8">
+        <StackPanel Orientation="Vertical">
+          <TextBlock Text="嵌入外部应用" />
+          <nativeexe:ExternalAppHost />
+        </StackPanel>
+      </Border>
+    </Grid>
+
+</Window>

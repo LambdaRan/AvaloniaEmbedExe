@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="AvaloniaEmbedExe/AvaloniaEmbedExe.csproj" />
+  <Project Path="EmbedDemoWpf/EmbedDemoWpf.csproj" />
+</Solution>

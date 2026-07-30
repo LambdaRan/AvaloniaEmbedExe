@@ -1,0 +1,34 @@
+## .NET / Visual Studio
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+*.DotSettings.user
+
+## NuGet
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+build/
+
+## Rider / VS Code
+.idea/
+*.sln.iml
+*.code-workspace
+
+## OS files
+Thumbs.db
+.DS_Store
+
+## Claude
+.claude/
