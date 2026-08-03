@@ -31,7 +31,10 @@
       <Border Grid.Row="1" Grid.Column="1" BorderBrush="Red" BorderThickness="1" Margin="8">
         <StackPanel Orientation="Vertical">
           <TextBlock Text="嵌入外部应用" />
-          <nativeexe:ExternalAppHost />
+          <TextBlock x:Name="EmbedStatus"
+                     Foreground="Firebrick" TextWrapping="Wrap" MaxWidth="240"
+                     Margin="0,4" IsVisible="False"/>
+          <nativeexe:ExternalAppHost x:Name="ExternalApp" />
         </StackPanel>
       </Border>
     </Grid>

@@ -11,7 +11,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Folder Include="Models\" />
     <AvaloniaResource Include="Assets\**" />
   </ItemGroup>
 
@@ -24,11 +23,10 @@
     <PackageReference Include="Avalonia.Desktop" Version="12.1.0" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.0" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.0" />
-    <!--Condition below is needed to remove Avalonia.Diagnostics package from build output in Release configuration.-->
-    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.18">
-      <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
-      <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
-    </PackageReference>
+    <!-- 原先这里引用了 Avalonia.Diagnostics 11.3.18，与 Avalonia 12.1.0 跨大版本混用，
+         还会把 11.x 的 Avalonia.Controls.ColorPicker 一并拖进输出目录。
+         Avalonia 12 已不再提供 Avalonia.Diagnostics 包（NuGet 上最高仅 11.3.18），
+         且本项目未使用 AttachDevTools，故直接移除。 -->
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
   </ItemGroup>
 
