@@ -1,6 +1,9 @@
 using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+using Windows.Win32;
+using Windows.Win32.System.JobObjects;
 
 namespace AvaloniaEmbedExe.Controls
 {
@@ -16,13 +19,13 @@ namespace AvaloniaEmbedExe.Controls
     /// <para>
     /// Job Object 把回收责任交给内核：本进程是该 Job 的唯一句柄持有者，进程一死（任何原因）
     /// 句柄随之关闭，内核立即终止 Job 内所有进程。因此 Job 句柄要故意"泄漏"到进程生命周期结束，
-    /// 绝不主动 CloseHandle。
+    /// 绝不主动 Dispose（SafeHandle 被 GC 终结时同样会关闭句柄，所以必须用静态字段钉住它）。
     /// </para>
     /// </remarks>
     internal static class ChildProcessJob
     {
         private static readonly object Gate = new();
-        private static IntPtr _jobHandle;
+        private static SafeFileHandle? _jobHandle;
         private static bool _initialized;
 
         /// <summary>
@@ -34,8 +37,8 @@ namespace AvaloniaEmbedExe.Controls
         {
             ArgumentNullException.ThrowIfNull(process);
 
-            IntPtr job = EnsureJob();
-            if (job == IntPtr.Zero)
+            SafeFileHandle? job = EnsureJob();
+            if (job is null)
                 return false;
 
             try
@@ -44,7 +47,9 @@ namespace AvaloniaEmbedExe.Controls
                 if (processHandle == IntPtr.Zero)
                     return false;
 
-                if (InteropUtil.AssignProcessToJobObject(job, processHandle))
+                // 只是把现有句柄借给这次调用，不拥有它，绝不能让 SafeHandle 去关闭它
+                using var borrowedProcessHandle = new SafeFileHandle(processHandle, ownsHandle: false);
+                if (PInvoke.AssignProcessToJobObject(job, borrowedProcessHandle))
                 {
                     Debug.WriteLine($"[ChildProcessJob] PID {process.Id} 已登记进 Job，宿主退出时将由内核回收");
                     return true;
@@ -62,7 +67,7 @@ namespace AvaloniaEmbedExe.Controls
             return false;
         }
 
-        private static IntPtr EnsureJob()
+        private static SafeFileHandle? EnsureJob()
         {
             lock (Gate)
             {
@@ -71,41 +76,34 @@ namespace AvaloniaEmbedExe.Controls
 
                 _initialized = true;
 
-                IntPtr job = InteropUtil.CreateJobObject(IntPtr.Zero, null);
-                if (job == IntPtr.Zero)
+                SafeFileHandle job = PInvoke.CreateJobObject(null, null);
+                if (job.IsInvalid)
                 {
                     Debug.WriteLine($"[ChildProcessJob] CreateJobObject 失败, Win32Error={Marshal.GetLastWin32Error()}");
-                    return IntPtr.Zero;
+                    job.Dispose();
+                    return null;
                 }
 
-                var info = new InteropUtil.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+                // KILL_ON_JOB_CLOSE 是基本限制里的 LimitFlags 位，basic 结构足够，
+                // 无需 extended（extended 只为进程/Job 内存上限等扩展字段而存在）
+                var info = new JOBOBJECT_BASIC_LIMIT_INFORMATION
                 {
-                    BasicLimitInformation = new InteropUtil.JOBOBJECT_BASIC_LIMIT_INFORMATION
-                    {
-                        LimitFlags = InteropUtil.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                    },
+                    LimitFlags = JOB_OBJECT_LIMIT.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
                 };
 
-                int size = Marshal.SizeOf<InteropUtil.JOBOBJECT_EXTENDED_LIMIT_INFORMATION>();
-                IntPtr buffer = Marshal.AllocHGlobal(size);
-                try
+                // 友好重载直接收 ReadOnlySpan<byte>，省掉了原先 AllocHGlobal/StructureToPtr 的手工编排
+                if (!PInvoke.SetInformationJobObject(
+                        job,
+                        JOBOBJECTINFOCLASS.JobObjectBasicLimitInformation,
+                        MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref info, 1))))
                 {
-                    Marshal.StructureToPtr(info, buffer, fDeleteOld: false);
-                    if (!InteropUtil.SetInformationJobObject(
-                            job, InteropUtil.JOBOBJECTINFOCLASS.ExtendedLimitInformation, buffer, (uint)size))
-                    {
-                        Debug.WriteLine($"[ChildProcessJob] SetInformationJobObject 失败, " +
-                                        $"Win32Error={Marshal.GetLastWin32Error()}");
-                        InteropUtil.CloseHandle(job);
-                        return IntPtr.Zero;
-                    }
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(buffer);
+                    Debug.WriteLine($"[ChildProcessJob] SetInformationJobObject 失败, " +
+                                    $"Win32Error={Marshal.GetLastWin32Error()}");
+                    job.Dispose();
+                    return null;
                 }
 
-                // 故意不关闭：句柄必须活到本进程结束，届时内核回收 Job 内所有进程。
+                // 故意不 Dispose：句柄必须活到本进程结束，届时内核回收 Job 内所有进程。
                 _jobHandle = job;
                 Debug.WriteLine("[ChildProcessJob] Job Object 已创建 (KILL_ON_JOB_CLOSE)");
                 return _jobHandle;

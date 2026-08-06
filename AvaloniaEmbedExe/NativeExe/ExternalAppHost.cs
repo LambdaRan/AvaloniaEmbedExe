@@ -10,6 +10,10 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Platform;
 using Avalonia.Threading;
+using Windows.Win32;
+using Windows.Win32.Foundation;
+using Windows.Win32.UI.Accessibility;
+using Windows.Win32.UI.WindowsAndMessaging;
 
 namespace AvaloniaEmbedExe.Controls;
 
@@ -48,13 +52,13 @@ public class ExternalAppHost : NativeControlHost
 
     private ContainerWindow? _container;
     private Process? _process;
-    private IntPtr _embeddedHwnd;
+    private HWND _embeddedHwnd;
     private CancellationTokenSource? _launchCts;
     private bool _tornDown;
 
     // ---- 尺寸同步（WinEventHook + 防抖）----
-    private IntPtr _winEventHookHandle;
-    private InteropUtil.WinEventProc? _winEventProcDelegate; // 防止 GC 回收回调存根
+    private UnhookWinEventSafeHandle? _winEventHookHandle;
+    private WINEVENTPROC? _winEventProcDelegate; // 防止 GC 回收回调存根
     private (int width, int height) _naturalSizePx;
     private DispatcherTimer? _debounceTimer;
     private (int width, int height) _pendingSizePx;
@@ -96,24 +100,6 @@ public class ExternalAppHost : NativeControlHost
 
     // ---- 生命周期 ----
 
-    protected override IPlatformHandle CreateNativeControlCore(IPlatformHandle parent)
-    {
-        _tornDown = false;
-        _container = new ContainerWindow(parent.Handle);
-
-        _debounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
-        _debounceTimer.Tick += (_, _) => ApplyPendingSize();
-
-        // 立刻返回容器句柄，绝不在这里等外部程序 —— 本方法由 UpdateHost() 在
-        // OnAttachedToVisualTree 中同步调用于 UI 线程，任何阻塞都是界面卡死。
-        // 容器句柄在这里就地取出传给后台任务：嵌入过程需要它，而后台线程不该去读
-        // 可能已被 Teardown 置空的 _container 字段。
-        _launchCts = new CancellationTokenSource();
-        _ = LaunchAsync(ExePath, _container.Handle, LaunchTimeout, _launchCts.Token);
-
-        return _container;
-    }
-
     protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
     {
         base.OnAttachedToVisualTree(e);
@@ -148,7 +134,25 @@ public class ExternalAppHost : NativeControlHost
         }
     }
 
-    protected override void DestroyNativeControlCore(IPlatformHandle control)
+	protected override IPlatformHandle CreateNativeControlCore(IPlatformHandle parent)
+	{
+		_tornDown = false;
+		_container = new ContainerWindow(parent.Handle);
+
+		_debounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+		_debounceTimer.Tick += (_, _) => ApplyPendingSize();
+
+		// 立刻返回容器句柄，绝不在这里等外部程序 —— 本方法由 UpdateHost() 在
+		// OnAttachedToVisualTree 中同步调用于 UI 线程，任何阻塞都是界面卡死。
+		// 容器句柄在这里就地取出传给后台任务：嵌入过程需要它，而后台线程不该去读
+		// 可能已被 Teardown 置空的 _container 字段。
+		_launchCts = new CancellationTokenSource();
+		_ = LaunchAsync(ExePath, _container.Handle, LaunchTimeout, _launchCts.Token);
+
+		return _container;
+	}
+
+	protected override void DestroyNativeControlCore(IPlatformHandle control)
     {
         Teardown();
         base.DestroyNativeControlCore(control);
@@ -173,17 +177,15 @@ public class ExternalAppHost : NativeControlHost
         _debounceTimer?.Stop();
         _debounceTimer = null;
 
-        if (_winEventHookHandle != IntPtr.Zero)
-        {
-            InteropUtil.UnhookWinEvent(_winEventHookHandle);
-            _winEventHookHandle = IntPtr.Zero;
-        }
+        // SafeHandle 的 Dispose 会自动调用 UnhookWinEvent
+        _winEventHookHandle?.Dispose();
+        _winEventHookHandle = null;
         _winEventProcDelegate = null;
 
         StopExitWatch();
         CloseExternalProcess();
 
-        _embeddedHwnd = IntPtr.Zero;
+        _embeddedHwnd = HWND.Null;
         _naturalSizePx = default;
         _pendingSizePx = default;
 
@@ -205,8 +207,8 @@ public class ExternalAppHost : NativeControlHost
             // 作为其子窗口会被 Windows 递归回收，此处 IsWindow 已为 false。外部程序此时收到的是
             // WM_DESTROY（标准的"窗口即将消失"通知），多数程序会据此自行退出，随后被下面的
             // WaitForExit 确认。控件单独分离（应用继续运行）时窗口仍然存活，WM_CLOSE 正常送达。
-            if (_embeddedHwnd != IntPtr.Zero && InteropUtil.IsWindow(_embeddedHwnd))
-                InteropUtil.PostMessage(_embeddedHwnd, InteropUtil.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            if (_embeddedHwnd != HWND.Null && PInvoke.IsWindow(_embeddedHwnd))
+                PInvoke.PostMessage(_embeddedHwnd, PInvoke.WM_CLOSE, 0, 0);
 
             if (process == null)
                 return;
@@ -272,15 +274,15 @@ public class ExternalAppHost : NativeControlHost
             // 内核也会回收这个子进程。
             ChildProcessJob.TryRegister(process);
 
-            IntPtr hwnd = await WaitForMainWindowAsync(process, windowsBeforeLaunch, timeout, ct)
+            HWND hwnd = await WaitForMainWindowAsync(process, windowsBeforeLaunch, timeout, ct)
                 .ConfigureAwait(false);
 
-            if (hwnd == IntPtr.Zero)
+            if (hwnd == HWND.Null)
                 throw new TimeoutException(
                     $"在 {timeout.TotalSeconds:0.#} 秒内未能获取外部程序的窗口句柄 " +
                     $"(进程: {exePath}, PID: {process.Id})。程序可能启动失败或未创建窗口。");
 
-// 就地完成嵌入，绝不为此跳回 UI 线程 —— 详见 EmbedIntoContainerAsync。
+            // 就地完成嵌入，绝不为此跳回 UI 线程 —— 详见 EmbedIntoContainerAsync。
             (int width, int height) naturalSizePx =
                 await EmbedIntoContainerAsync(hwnd, containerHandle, ct).ConfigureAwait(false);
 
@@ -343,15 +345,15 @@ public class ExternalAppHost : NativeControlHost
     /// </para>
     /// </remarks>
     private static async Task<(int width, int height)> EmbedIntoContainerAsync(
-        IntPtr hwnd, IntPtr containerHandle, CancellationToken ct)
+        HWND hwnd, IntPtr containerHandle, CancellationToken ct)
     {
         // 1. 先隐藏。若窗口已经显示出来了（找得晚），这一步立刻把它从桌面上摘掉。
-        InteropUtil.ShowWindow(hwnd, InteropUtil.SW_HIDE);
+        PInvoke.ShowWindow(hwnd, SHOW_WINDOW_CMD.SW_HIDE);
 
         // 2. 立刻 SetParent —— 消除闪现的关键一步，越早越好。
         //    此刻窗口还带着标题栏，但它是隐藏的，而且已经进了容器的层级：
         //    后面无论花多久整形，都不会再有任何东西出现在桌面上。
-        if (InteropUtil.SetParent(hwnd, containerHandle) == IntPtr.Zero)
+        if (PInvoke.SetParent(hwnd, (HWND)containerHandle) == HWND.Null)
             Debug.WriteLine($"[ExternalAppHost] SetParent 失败, " +
                             $"Win32Error={Marshal.GetLastWin32Error()}");
 
@@ -383,8 +385,9 @@ public class ExternalAppHost : NativeControlHost
 
         // 保持隐藏：这里只定尺寸。显示交给 UI 线程侧的 PositionEmbeddedWindow，
         // 或者外部程序自己的 ShowWindow —— 那时它已经在容器里了。
-        InteropUtil.SetWindowPos(hwnd, IntPtr.Zero, 0, 0, targetWidth, targetHeight,
-            InteropUtil.SWP_NOMOVE | InteropUtil.SWP_NOZORDER | InteropUtil.SWP_NOACTIVATE);
+        PInvoke.SetWindowPos(hwnd, HWND.Null, 0, 0, targetWidth, targetHeight,
+            SET_WINDOW_POS_FLAGS.SWP_NOMOVE | SET_WINDOW_POS_FLAGS.SWP_NOZORDER |
+            SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE);
 
         return GetWindowSizePx(hwnd);
     }
@@ -410,7 +413,7 @@ public class ExternalAppHost : NativeControlHost
     /// </para>
     /// </remarks>
     private static async Task<(int width, int height)> WaitForStableClientSizeAsync(
-        IntPtr hwnd, CancellationToken ct)
+        HWND hwnd, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
         (int width, int height) last = GetClientSizePx(hwnd);
@@ -441,7 +444,7 @@ public class ExternalAppHost : NativeControlHost
     }
 
     /// <summary>当前样式下，窗口矩形比客户区大出来的部分（物理像素）。</summary>
-    private static (int width, int height) GetNonClientOverheadPx(IntPtr hwnd)
+    private static (int width, int height) GetNonClientOverheadPx(HWND hwnd)
     {
         var (windowWidth, windowHeight) = GetWindowSizePx(hwnd);
         var (clientWidth, clientHeight) = GetClientSizePx(hwnd);
@@ -452,10 +455,10 @@ public class ExternalAppHost : NativeControlHost
     /// <summary>
     /// 在 UI 线程上完成嵌入的记账工作 —— 窗口的整形已经由后台线程做完了。
     /// </summary>
-    private void AttachWindow(Process process, IntPtr hwnd, (int width, int height) naturalSizePx)
+    private void AttachWindow(Process process, HWND hwnd, (int width, int height) naturalSizePx)
     {
         // 等待期间控件可能已被销毁
-        if (_tornDown || _container == null || !InteropUtil.IsWindow(hwnd))
+        if (_tornDown || _container == null || !PInvoke.IsWindow(hwnd))
         {
             KillQuietly(process);
             return;
@@ -468,7 +471,7 @@ public class ExternalAppHost : NativeControlHost
         InstallWinEventHook(hwnd);
         StartExitWatch(process);
 
-        Debug.WriteLine($"[ExternalAppHost] 已嵌入 HWND={hwnd}, PID={process.Id}, " +
+        Debug.WriteLine($"[ExternalAppHost] 已嵌入 HWND={(IntPtr)hwnd}, PID={process.Id}, " +
                         $"自然尺寸={_naturalSizePx.width}x{_naturalSizePx.height}px");
 
         InvalidateMeasure();
@@ -494,28 +497,31 @@ public class ExternalAppHost : NativeControlHost
     /// 会被裁剪到容器内、随容器移动，菜单条则正常保留。
     /// </para>
     /// </remarks>
-    private static void PrepareWindowStylesForEmbedding(IntPtr hwnd)
+    private static void PrepareWindowStylesForEmbedding(HWND hwnd)
     {
-        uint style = InteropUtil.GetWindowLong(hwnd, InteropUtil.GWL_STYLE);
+        // GetWindowLong 返回 LONG（int）；先转 uint 再还原成 WINDOW_STYLE，
+        // 避免高位样式（如 WS_POPUP = 0x80000000）带符号参与位运算
+        var style = (WINDOW_STYLE)(uint)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE);
 
         // 去掉标题栏（WS_CAPTION）、系统菜单/关闭按钮（WS_SYSMENU）、
         // 最小化/最大化按钮、可调边框（WS_THICKFRAME）。
-        style &= ~(InteropUtil.WS_CAPTION | InteropUtil.WS_SYSMENU |
-                   InteropUtil.WS_THICKFRAME |
-                   InteropUtil.WS_MINIMIZEBOX | InteropUtil.WS_MAXIMIZEBOX);
+        style &= ~(WINDOW_STYLE.WS_CAPTION | WINDOW_STYLE.WS_SYSMENU |
+                   WINDOW_STYLE.WS_THICKFRAME |
+                   WINDOW_STYLE.WS_MINIMIZEBOX | WINDOW_STYLE.WS_MAXIMIZEBOX);
 
-        InteropUtil.SetWindowLong(hwnd, InteropUtil.GWL_STYLE, style);
+        PInvoke.SetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE, (int)style);
     }
 
     /// <summary>
     /// 触发 SWP_FRAMECHANGED，让系统根据窗口当前的样式和层级（父窗口）重新计算非客户区。
     /// 必须在 SetParent 之后调用，否则系统会按顶层窗口来计算 frame。
     /// </summary>
-    private static void ApplyFrameChanged(IntPtr hwnd)
+    private static void ApplyFrameChanged(HWND hwnd)
     {
-        InteropUtil.SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
-            InteropUtil.SWP_NOMOVE | InteropUtil.SWP_NOSIZE | InteropUtil.SWP_NOZORDER |
-            InteropUtil.SWP_NOACTIVATE | InteropUtil.SWP_FRAMECHANGED);
+        PInvoke.SetWindowPos(hwnd, HWND.Null, 0, 0, 0, 0,
+            SET_WINDOW_POS_FLAGS.SWP_NOMOVE | SET_WINDOW_POS_FLAGS.SWP_NOSIZE |
+            SET_WINDOW_POS_FLAGS.SWP_NOZORDER | SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE |
+            SET_WINDOW_POS_FLAGS.SWP_FRAMECHANGED);
     }
 
     // ---- 布局 ----
@@ -577,7 +583,7 @@ public class ExternalAppHost : NativeControlHost
     /// </remarks>
     private void PositionEmbeddedWindow(Size finalSize)
     {
-        if (_embeddedHwnd == IntPtr.Zero || !InteropUtil.IsWindow(_embeddedHwnd))
+        if (_embeddedHwnd == HWND.Null || !PInvoke.IsWindow(_embeddedHwnd))
             return;
 
         var (nw, nh) = _naturalSizePx;
@@ -601,30 +607,30 @@ public class ExternalAppHost : NativeControlHost
         int offsetY = Math.Max(0, (containerH - nh) / 2);
 
         // 尺寸不能在这里写回去 —— 必须带 SWP_NOSIZE，理由见方法注释。
-        InteropUtil.SetWindowPos(_embeddedHwnd, IntPtr.Zero,
+        PInvoke.SetWindowPos(_embeddedHwnd, HWND.Null,
             offsetX, offsetY, 0, 0,
-            InteropUtil.SWP_NOSIZE | InteropUtil.SWP_NOZORDER |
-            InteropUtil.SWP_NOACTIVATE | InteropUtil.SWP_SHOWWINDOW);
+            SET_WINDOW_POS_FLAGS.SWP_NOSIZE | SET_WINDOW_POS_FLAGS.SWP_NOZORDER |
+            SET_WINDOW_POS_FLAGS.SWP_NOACTIVATE | SET_WINDOW_POS_FLAGS.SWP_SHOWWINDOW);
     }
 
     // ---- 外部窗口尺寸变化监听 ----
 
-    private void InstallWinEventHook(IntPtr hwnd)
+    private void InstallWinEventHook(HWND hwnd)
     {
         _winEventProcDelegate = OnWinEvent;
 
-        uint threadId = InteropUtil.GetWindowThreadProcessId(hwnd, out uint processId);
+        uint threadId = PInvoke.GetWindowThreadProcessId(hwnd, out uint processId);
 
-        _winEventHookHandle = InteropUtil.SetWinEventHook(
-            InteropUtil.EVENT_OBJECT_LOCATIONCHANGE,
-            InteropUtil.EVENT_OBJECT_LOCATIONCHANGE,
-            IntPtr.Zero,
+        _winEventHookHandle = PInvoke.SetWinEventHook(
+            PInvoke.EVENT_OBJECT_LOCATIONCHANGE,
+            PInvoke.EVENT_OBJECT_LOCATIONCHANGE,
+            null,
             _winEventProcDelegate,
             processId,   // 只监听嵌入应用的进程
             threadId,    // 只监听嵌入窗口的线程
-            InteropUtil.WINEVENT_OUTOFCONTEXT);
+            PInvoke.WINEVENT_OUTOFCONTEXT);
 
-        if (_winEventHookHandle == IntPtr.Zero)
+        if (_winEventHookHandle.IsInvalid)
             Debug.WriteLine("[ExternalAppHost] SetWinEventHook 失败，将无法跟随外部窗口的尺寸变化");
     }
 
@@ -633,13 +639,13 @@ public class ExternalAppHost : NativeControlHost
     /// 调用 SetWinEventHook 的线程（即 UI 线程）上派发，因此可以直接操作控件状态。
     /// </summary>
     private void OnWinEvent(
-        IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
+        HWINEVENTHOOK hWinEventHook, uint eventType, HWND hwnd,
         int idObject, int idChild, uint idEventThread, uint dwmsEventTime)
     {
         if (hwnd != _embeddedHwnd ||
-            idObject != InteropUtil.OBJID_WINDOW ||
-            idChild != InteropUtil.CHILDID_SELF ||
-            eventType != InteropUtil.EVENT_OBJECT_LOCATIONCHANGE)
+            idObject != (int)OBJECT_IDENTIFIER.OBJID_WINDOW ||
+            idChild != PInvoke.CHILDID_SELF ||
+            eventType != PInvoke.EVENT_OBJECT_LOCATIONCHANGE)
             return;
 
         var currentPx = GetWindowSizePx(hwnd);
@@ -670,14 +676,14 @@ public class ExternalAppHost : NativeControlHost
         Debug.WriteLine($"[ExternalAppHost] 外部窗口自然尺寸更新为 {_naturalSizePx.width}x{_naturalSizePx.height}px");
     }
 
-    private static (int width, int height) GetWindowSizePx(IntPtr hwnd)
-        => InteropUtil.GetWindowRect(hwnd, out var rect)
-            ? (rect.Right - rect.Left, rect.Bottom - rect.Top)
+    private static (int width, int height) GetWindowSizePx(HWND hwnd)
+        => PInvoke.GetWindowRect(hwnd, out var rect)
+            ? (rect.right - rect.left, rect.bottom - rect.top)
             : (0, 0);
 
-    private static (int width, int height) GetClientSizePx(IntPtr hwnd)
-        => InteropUtil.GetClientRect(hwnd, out var rect)
-            ? (rect.Right - rect.Left, rect.Bottom - rect.Top)
+    private static (int width, int height) GetClientSizePx(HWND hwnd)
+        => PInvoke.GetClientRect(hwnd, out var rect)
+            ? (rect.right - rect.left, rect.bottom - rect.top)
             : (0, 0);
 
     // ---- 外部进程退出监听 ----
@@ -717,7 +723,7 @@ public class ExternalAppHost : NativeControlHost
                     return;
 
                 Debug.WriteLine("[ExternalAppHost] 外部程序已自行退出");
-                _embeddedHwnd = IntPtr.Zero;
+                _embeddedHwnd = HWND.Null;
                 _naturalSizePx = default;
                 InvalidateMeasure();
                 ExternalAppExited?.Invoke(this, EventArgs.Empty);
@@ -755,7 +761,7 @@ public class ExternalAppHost : NativeControlHost
     /// 关键是别为了 SetParent 跳回 UI 线程：启动阶段那一跳要等到约 280ms。
     /// </para>
     /// </remarks>
-    private static async Task<IntPtr> WaitForMainWindowAsync(
+    private static async Task<HWND> WaitForMainWindowAsync(
         Process process, HashSet<IntPtr> windowsBeforeLaunch, TimeSpan timeout, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
@@ -768,22 +774,22 @@ public class ExternalAppHost : NativeControlHost
                 throw new InvalidOperationException(
                     $"外部程序在创建窗口前就退出了 (PID: {process.Id}, 退出码: {process.ExitCode})。");
 
-            IntPtr found = FindWindowByProcess(process, windowsBeforeLaunch);
-            if (found != IntPtr.Zero)
+            HWND found = FindWindowByProcess(process, windowsBeforeLaunch);
+            if (found != HWND.Null)
             {
                 // 窗口此刻很可能还没显示；先隐藏是为了应对"已经显示出来了"的情况，
                 // 让它在 SetParent 完成前从桌面上消失。
-                InteropUtil.ShowWindow(found, InteropUtil.SW_HIDE);
+                PInvoke.ShowWindow(found, SHOW_WINDOW_CMD.SW_HIDE);
                 return found;
             }
 
             try
             {
                 process.Refresh();
-                IntPtr main = process.MainWindowHandle;
-                if (main != IntPtr.Zero)
+                HWND main = (HWND)process.MainWindowHandle;
+                if (main != HWND.Null)
                 {
-                    InteropUtil.ShowWindow(main, InteropUtil.SW_HIDE);
+                    PInvoke.ShowWindow(main, SHOW_WINDOW_CMD.SW_HIDE);
                     return main;
                 }
             }
@@ -793,7 +799,7 @@ public class ExternalAppHost : NativeControlHost
             await Task.Delay(25, ct).ConfigureAwait(false);
         }
 
-        return IntPtr.Zero;
+        return HWND.Null;
     }
 
     /// <summary>
@@ -821,7 +827,7 @@ public class ExternalAppHost : NativeControlHost
     /// 自绘标题栏（纯 WS_POPUP）的程序会漏判，由调用方的 MainWindowHandle 兜底。
     /// </para>
     /// </remarks>
-    private static IntPtr FindWindowByProcess(Process process, HashSet<IntPtr> windowsBeforeLaunch)
+    private static HWND FindWindowByProcess(Process process, HashSet<IntPtr> windowsBeforeLaunch)
     {
         uint targetPid;
         try
@@ -830,40 +836,40 @@ public class ExternalAppHost : NativeControlHost
         }
         catch
         {
-            return IntPtr.Zero;
+            return HWND.Null;
         }
 
-        IntPtr foundHwnd = IntPtr.Zero;
+        HWND foundHwnd = HWND.Null;
 
-        InteropUtil.EnumWindows((hwnd, _) =>
+        PInvoke.EnumWindows((hwnd, _) =>
         {
             // 排除启动前就已存在的窗口
             if (windowsBeforeLaunch.Contains(hwnd))
                 return true;
 
             // 只接受归属目标进程的窗口
-            InteropUtil.GetWindowThreadProcessId(hwnd, out uint wndPid);
+            PInvoke.GetWindowThreadProcessId(hwnd, out uint wndPid);
             if (wndPid != targetPid)
                 return true;
 
             // 跳过有 owner 的窗口（工具窗、对话框、IME 窗口）
-            if (InteropUtil.GetWindow(hwnd, InteropUtil.GW_OWNER) != IntPtr.Zero)
+            if (PInvoke.GetWindow(hwnd, GET_WINDOW_CMD.GW_OWNER) != HWND.Null)
                 return true;
 
-            uint style = InteropUtil.GetWindowLong(hwnd, InteropUtil.GWL_STYLE);
+            var style = (WINDOW_STYLE)(uint)PInvoke.GetWindowLong(hwnd, WINDOW_LONG_PTR_INDEX.GWL_STYLE);
 
             // 子窗口不可能是主框架
-            if ((style & InteropUtil.WS_CHILD) != 0)
+            if ((style & WINDOW_STYLE.WS_CHILD) != 0)
                 return true;
 
             // 必须同时具备标题栏和系统菜单 —— 见方法注释
-            if ((style & InteropUtil.WS_CAPTION) != InteropUtil.WS_CAPTION ||
-                (style & InteropUtil.WS_SYSMENU) == 0)
+            if ((style & WINDOW_STYLE.WS_CAPTION) != WINDOW_STYLE.WS_CAPTION ||
+                (style & WINDOW_STYLE.WS_SYSMENU) == 0)
                 return true;
 
             foundHwnd = hwnd;
             return false;
-        }, IntPtr.Zero);
+        }, 0);
 
         return foundHwnd;
     }
@@ -878,11 +884,11 @@ public class ExternalAppHost : NativeControlHost
     private static HashSet<IntPtr> GetTopLevelWindowHandles()
     {
         var result = new HashSet<IntPtr>();
-        InteropUtil.EnumWindows((hwnd, _) =>
+        PInvoke.EnumWindows((hwnd, _) =>
         {
             result.Add(hwnd);
             return true;
-        }, IntPtr.Zero);
+        }, 0);
         return result;
     }
 }

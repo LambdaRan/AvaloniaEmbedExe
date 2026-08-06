@@ -28,6 +28,9 @@
          Avalonia 12 已不再提供 Avalonia.Diagnostics 包（NuGet 上最高仅 11.3.18），
          且本项目未使用 AttachDevTools，故直接移除。 -->
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <!-- Win32 P/Invoke 源生成器：按 NativeMethods.txt 在编译期生成强类型绑定（PInvoke 类）。
+         PrivateAssets=all：纯编译期工具，不带运行时程序集进输出。 -->
+    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.298" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>

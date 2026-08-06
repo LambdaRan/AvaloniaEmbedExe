@@ -1,0 +1,45 @@
+// CsWin32 输入清单：列出本项目实际用到的 Win32 API。
+// 编译期由源生成器产出 Windows.Win32.PInvoke 类及配套类型。
+// 参考：https://github.com/microsoft/CsWin32
+
+// ===== user32：窗口整形与嵌入 =====
+GetWindowLong
+SetWindowLong
+SetWindowPos
+SetParent
+IsWindow
+EnumWindows
+GetWindowThreadProcessId
+GetWindow
+PostMessage
+GetWindowRect
+GetClientRect
+ShowWindow
+SetWinEventHook
+RegisterClassEx
+CreateWindowEx
+DefWindowProc
+DestroyWindow
+
+// ===== kernel32：Job Object / 模块句柄 =====
+GetModuleHandle
+CreateJobObject
+SetInformationJobObject
+AssignProcessToJobObject
+
+// ===== 枚举与常量 =====
+WINDOW_STYLE
+WINDOW_LONG_PTR_INDEX
+SET_WINDOW_POS_FLAGS
+GET_WINDOW_CMD
+SHOW_WINDOW_CMD
+OBJECT_IDENTIFIER
+JOB_OBJECT_LIMIT
+WM_CLOSE
+EVENT_OBJECT_LOCATIONCHANGE
+WINEVENT_OUTOFCONTEXT
+CHILDID_SELF
+
+// ===== 结构体 =====
+// SetInformationJobObject 的 void* 参数不会自动带出结构体，需显式请求
+JOBOBJECT_BASIC_LIMIT_INFORMATION
